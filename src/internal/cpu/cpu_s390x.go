@@ -71,6 +71,9 @@ const (
 	msa5 facility = 57  // message-security-assist extension 5
 	msa8 facility = 146 // message-security-assist extension 8
 
+	// vector facilities
+	ve1 facility = 135 // vector-enhancements 1
+
 	// Note: vx and highgprs are excluded because they require
 	// kernel support and so must be fetched from HWCAP.
 )
@@ -107,14 +110,15 @@ func klmdQuery() queryResult
 
 func doinit() {
 	options = []option{
-		{"zarch", &S390X.HasZArch},
-		{"stfle", &S390X.HasSTFLE},
-		{"ldisp", &S390X.HasLDisp},
-		{"msa", &S390X.HasMSA},
-		{"eimm", &S390X.HasEImm},
-		{"dfp", &S390X.HasDFP},
-		{"etf3eh", &S390X.HasETF3Enhanced},
-		{"vx", &S390X.HasVX},
+		{Name: "zarch", Feature: &S390X.HasZArch},
+		{Name: "stfle", Feature: &S390X.HasSTFLE},
+		{Name: "ldisp", Feature: &S390X.HasLDisp},
+		{Name: "msa", Feature: &S390X.HasMSA},
+		{Name: "eimm", Feature: &S390X.HasEImm},
+		{Name: "dfp", Feature: &S390X.HasDFP},
+		{Name: "etf3eh", Feature: &S390X.HasETF3Enhanced},
+		{Name: "vx", Feature: &S390X.HasVX},
+		{Name: "ve1", Feature: &S390X.HasVE1},
 	}
 
 	aes := []function{aes128, aes192, aes256}
@@ -149,5 +153,8 @@ func doinit() {
 		S390X.HasSHA256 = kimd.Has(sha256) && klmd.Has(sha256)
 		S390X.HasSHA512 = kimd.Has(sha512) && klmd.Has(sha512)
 		S390X.HasGHASH = kimd.Has(ghash) // KLMD-GHASH does not exist
+	}
+	if S390X.HasVX {
+		S390X.HasVE1 = facilities.Has(ve1)
 	}
 }

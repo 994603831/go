@@ -7,7 +7,9 @@ package ssa
 import (
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
+	"cmd/internal/objabi"
 	"cmd/internal/src"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
@@ -175,23 +177,11 @@ func canMergeSym(x, y interface{}) bool {
 	return x == nil || y == nil
 }
 
-// canMergeLoad reports whether the load can be merged into target without
+// canMergeLoadClobber reports whether the load can be merged into target without
 // invalidating the schedule.
 // It also checks that the other non-load argument x is something we
-// are ok with clobbering (all our current load+op instructions clobber
-// their input register).
-func canMergeLoad(target, load, x *Value) bool {
-	if target.Block.ID != load.Block.ID {
-		// If the load is in a different block do not merge it.
-		return false
-	}
-
-	// We can't merge the load into the target if the load
-	// has more than one use.
-	if load.Uses != 1 {
-		return false
-	}
-
+// are ok with clobbering.
+func canMergeLoadClobber(target, load, x *Value) bool {
 	// The register containing x is going to get clobbered.
 	// Don't merge if we still need the value of x.
 	// We don't have liveness information here, but we can
@@ -204,6 +194,22 @@ func canMergeLoad(target, load, x *Value) bool {
 	loopnest := x.Block.Func.loopnest()
 	loopnest.calculateDepths()
 	if loopnest.depth(target.Block.ID) > loopnest.depth(x.Block.ID) {
+		return false
+	}
+	return canMergeLoad(target, load)
+}
+
+// canMergeLoad reports whether the load can be merged into target without
+// invalidating the schedule.
+func canMergeLoad(target, load *Value) bool {
+	if target.Block.ID != load.Block.ID {
+		// If the load is in a different block do not merge it.
+		return false
+	}
+
+	// We can't merge the load into the target if the load
+	// has more than one use.
+	if load.Uses != 1 {
 		return false
 	}
 
@@ -234,7 +240,6 @@ func canMergeLoad(target, load, x *Value) bool {
 	// memPreds contains memory states known to be predecessors of load's
 	// memory state. It is lazily initialized.
 	var memPreds map[*Value]bool
-search:
 	for i := 0; len(args) > 0; i++ {
 		const limit = 100
 		if i >= limit {
@@ -246,13 +251,13 @@ search:
 		if target.Block.ID != v.Block.ID {
 			// Since target and load are in the same block
 			// we can stop searching when we leave the block.
-			continue search
+			continue
 		}
 		if v.Op == OpPhi {
 			// A Phi implies we have reached the top of the block.
 			// The memory phi, if it exists, is always
 			// the first logical store in the block.
-			continue search
+			continue
 		}
 		if v.Type.IsTuple() && v.Type.FieldType(1).IsMemory() {
 			// We could handle this situation however it is likely
@@ -296,14 +301,14 @@ search:
 			//   load = read ... mem
 			// target = add x load
 			if memPreds[v] {
-				continue search
+				continue
 			}
 			return false
 		}
 		if len(v.Args) > 0 && v.Args[len(v.Args)-1] == mem {
 			// If v takes mem as an input then we know mem
 			// is valid at this point.
-			continue search
+			continue
 		}
 		for _, a := range v.Args {
 			if target.Block.ID == a.Block.ID {
@@ -315,7 +320,7 @@ search:
 	return true
 }
 
-// isSameSym returns whether sym is the same as the given named symbol
+// isSameSym reports whether sym is the same as the given named symbol
 func isSameSym(sym interface{}, name string) bool {
 	s, ok := sym.(fmt.Stringer)
 	return ok && s.String() == name
@@ -450,22 +455,37 @@ func extend32Fto64F(f float32) float64 {
 	return math.Float64frombits(r)
 }
 
+// NeedsFixUp reports whether the division needs fix-up code.
+func NeedsFixUp(v *Value) bool {
+	return v.AuxInt == 0
+}
+
 // i2f is used in rules for converting from an AuxInt to a float.
 func i2f(i int64) float64 {
 	return math.Float64frombits(uint64(i))
 }
 
-// i2f32 is used in rules for converting from an AuxInt to a float32.
-func i2f32(i int64) float32 {
-	return float32(math.Float64frombits(uint64(i)))
-}
-
-// f2i is used in the rules for storing a float in AuxInt.
-func f2i(f float64) int64 {
+// auxFrom64F encodes a float64 value so it can be stored in an AuxInt.
+func auxFrom64F(f float64) int64 {
 	return int64(math.Float64bits(f))
 }
 
-// uaddOvf returns true if unsigned a+b would overflow.
+// auxFrom32F encodes a float32 value so it can be stored in an AuxInt.
+func auxFrom32F(f float32) int64 {
+	return int64(math.Float64bits(extend32Fto64F(f)))
+}
+
+// auxTo32F decodes a float32 from the AuxInt value provided.
+func auxTo32F(i int64) float32 {
+	return truncate64Fto32F(math.Float64frombits(uint64(i)))
+}
+
+// auxTo64F decodes a float64 from the AuxInt value provided.
+func auxTo64F(i int64) float64 {
+	return math.Float64frombits(uint64(i))
+}
+
+// uaddOvf reports whether unsigned a+b would overflow.
 func uaddOvf(a, b int64) bool {
 	return uint64(a)+uint64(b) < uint64(a)
 }
@@ -510,6 +530,13 @@ func isSamePtr(p1, p2 *Value) bool {
 	return false
 }
 
+func isStackPtr(v *Value) bool {
+	for v.Op == OpOffPtr || v.Op == OpAddPtr {
+		v = v.Args[0]
+	}
+	return v.Op == OpSP || v.Op == OpLocalAddr
+}
+
 // disjoint reports whether the memory region specified by [p1:p1+n1)
 // does not overlap with [p2:p2+n2).
 // A return value of false does not imply the regions overlap.
@@ -522,7 +549,7 @@ func disjoint(p1 *Value, n1 int64, p2 *Value, n2 int64) bool {
 	}
 	baseAndOffset := func(ptr *Value) (base *Value, offset int64) {
 		base, offset = ptr, 0
-		if base.Op == OpOffPtr {
+		for base.Op == OpOffPtr {
 			offset += base.AuxInt
 			base = base.Args[0]
 		}
@@ -1085,4 +1112,46 @@ func needRaceCleanup(sym interface{}, v *Value) bool {
 		}
 	}
 	return true
+}
+
+// symIsRO reports whether sym is a read-only global.
+func symIsRO(sym interface{}) bool {
+	lsym := sym.(*obj.LSym)
+	return lsym.Type == objabi.SRODATA && len(lsym.R) == 0
+}
+
+// read8 reads one byte from the read-only global sym at offset off.
+func read8(sym interface{}, off int64) uint8 {
+	lsym := sym.(*obj.LSym)
+	return lsym.P[off]
+}
+
+// read16 reads two bytes from the read-only global sym at offset off.
+func read16(sym interface{}, off int64, bigEndian bool) uint16 {
+	lsym := sym.(*obj.LSym)
+	if bigEndian {
+		return binary.BigEndian.Uint16(lsym.P[off:])
+	} else {
+		return binary.LittleEndian.Uint16(lsym.P[off:])
+	}
+}
+
+// read32 reads four bytes from the read-only global sym at offset off.
+func read32(sym interface{}, off int64, bigEndian bool) uint32 {
+	lsym := sym.(*obj.LSym)
+	if bigEndian {
+		return binary.BigEndian.Uint32(lsym.P[off:])
+	} else {
+		return binary.LittleEndian.Uint32(lsym.P[off:])
+	}
+}
+
+// read64 reads eight bytes from the read-only global sym at offset off.
+func read64(sym interface{}, off int64, bigEndian bool) uint64 {
+	lsym := sym.(*obj.LSym)
+	if bigEndian {
+		return binary.BigEndian.Uint64(lsym.P[off:])
+	} else {
+		return binary.LittleEndian.Uint64(lsym.P[off:])
+	}
 }

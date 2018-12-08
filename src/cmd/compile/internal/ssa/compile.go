@@ -8,7 +8,9 @@ import (
 	"cmd/internal/objabi"
 	"cmd/internal/src"
 	"fmt"
+	"hash/crc32"
 	"log"
+	"math/rand"
 	"os"
 	"regexp"
 	"runtime"
@@ -27,6 +29,11 @@ func Compile(f *Func) {
 	// which phases to dump IR before/after, etc.
 	if f.Log() {
 		f.Logf("compiling %s\n", f.Name)
+	}
+
+	var rnd *rand.Rand
+	if checkEnabled {
+		rnd = rand.New(rand.NewSource(int64(crc32.ChecksumIEEE(([]byte)(f.Name)))))
 	}
 
 	// hook to print function & phase if panic happens
@@ -66,6 +73,17 @@ func Compile(f *Func) {
 		var mStart runtime.MemStats
 		if logMemStats || p.mem {
 			runtime.ReadMemStats(&mStart)
+		}
+
+		if checkEnabled && !f.scheduled {
+			// Test that we don't depend on the value order, by randomizing
+			// the order of values in each block. See issue 18169.
+			for _, b := range f.Blocks {
+				for i := 0; i < len(b.Values)-1; i++ {
+					j := i + rnd.Intn(len(b.Values)-i)
+					b.Values[i], b.Values[j] = b.Values[j], b.Values[i]
+				}
+			}
 		}
 
 		tStart := time.Now()
@@ -365,6 +383,7 @@ var passes = [...]pass{
 	{name: "early copyelim", fn: copyelim},
 	{name: "early deadcode", fn: deadcode}, // remove generated dead code to avoid doing pointless work during opt
 	{name: "short circuit", fn: shortcircuit},
+	{name: "decompose args", fn: decomposeArgs, required: true},
 	{name: "decompose user", fn: decomposeUser, required: true},
 	{name: "opt", fn: opt, required: true},               // TODO: split required rules and optimizing rules
 	{name: "zero arg cse", fn: zcse, required: true},     // required to merge OpSB values
@@ -373,6 +392,7 @@ var passes = [...]pass{
 	{name: "phiopt", fn: phiopt},
 	{name: "nilcheckelim", fn: nilcheckelim},
 	{name: "prove", fn: prove},
+	{name: "fuse plain", fn: fusePlain},
 	{name: "decompose builtin", fn: decomposeBuiltIn, required: true},
 	{name: "softfloat", fn: softfloat, required: true},
 	{name: "late opt", fn: opt, required: true}, // TODO: split required rules and optimizing rules
@@ -380,7 +400,7 @@ var passes = [...]pass{
 	{name: "generic deadcode", fn: deadcode, required: true}, // remove dead stores, which otherwise mess up store chain
 	{name: "check bce", fn: checkbce},
 	{name: "branchelim", fn: branchelim},
-	{name: "fuse", fn: fuse},
+	{name: "fuse", fn: fuseAll},
 	{name: "dse", fn: dse},
 	{name: "writebarrier", fn: writebarrier, required: true}, // expand write barrier ops
 	{name: "insert resched checks", fn: insertLoopReschedChecks,

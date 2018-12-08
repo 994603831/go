@@ -1379,6 +1379,9 @@ func buildop(ctxt *obj.Link) {
 			opset(AVSBCBIQ, r)
 			opset(AVSBIQ, r)
 			opset(AVMSLG, r)
+			opset(AVMSLEG, r)
+			opset(AVMSLOG, r)
+			opset(AVMSLEOG, r)
 		case AVSEL:
 			opset(AVFMADB, r)
 			opset(AWFMADB, r)
@@ -2614,6 +2617,10 @@ func (c *ctxtz) branchMask(p *obj.Prog) uint32 {
 
 func (c *ctxtz) asmout(p *obj.Prog, asm *[]byte) {
 	o := c.oplook(p)
+
+	if o == nil {
+		return
+	}
 
 	switch o.type_ {
 	default:
